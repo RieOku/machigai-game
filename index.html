@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>間違い探しゲーム</title>
+<style>
+  * { box-sizing:border-box; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  html, body { width:100%; height:100%; margin:0; overflow:hidden; background:#000; touch-action:manipulation; }
+  #game { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  #stage { position:relative; line-height:0; }
+  #screen { display:block; max-width:100vw; max-height:100vh; width:auto; height:auto; object-fit:contain; -webkit-user-drag:none; }
+  #marks { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+  .mark { position:absolute; transform:translate(-50%,-50%); font-family:Arial,sans-serif; font-weight:900; line-height:1; color:#e60012; text-shadow:0 0 5px #fff,0 0 5px #fff; }
+  .correct { font-size:clamp(48px,8vw,120px); }
+  .wrong { font-size:clamp(42px,7vw,100px); }
+  #timer { display:none; position:fixed; left:50%; bottom:max(18px,env(safe-area-inset-bottom)); transform:translateX(-50%); z-index:20; min-width:150px; padding:10px 22px; border-radius:18px; background:rgba(0,0,0,.72); color:#fff; font:900 clamp(28px,4vw,54px)/1 Arial,sans-serif; text-align:center; box-shadow:0 0 0 3px rgba(255,255,255,.8); }
+  #finish { display:none; position:fixed; inset:0; z-index:30; align-items:center; justify-content:center; color:#e60012; font:900 clamp(90px,17vw,250px)/1 sans-serif; text-shadow:0 0 12px #fff,0 0 12px #fff; pointer-events:none; }
+  #notice { position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:40; color:#fff; background:rgba(0,0,0,.65); padding:6px 12px; border-radius:8px; font:14px/1.3 sans-serif; display:none; }
+</style>
+</head>
+<body>
+<div id="game">
+  <div id="stage">
+    <img id="screen" src="1.jpg" alt="1.jpg" draggable="false">
+    <div id="marks"></div>
+  </div>
+</div>
+<div id="timer">90</div>
+<div id="finish">終了</div>
+<div id="notice"></div>
+
+<audio id="seCorrect" src="maru.mp3" preload="auto"></audio>
+<audio id="seWrong" src="batu.mp3" preload="auto"></audio>
+<audio id="seFinish" src="hue.mp3" preload="auto"></audio>
+<audio id="bgm" src="play.mp3" preload="auto" loop></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  const screen = document.getElementById('screen');
+  const stage = document.getElementById('stage');
+  const marks = document.getElementById('marks');
+  const timerEl = document.getElementById('timer');
+  const finishEl = document.getElementById('finish');
+  const notice = document.getElementById('notice');
+  const bgm = document.getElementById('bgm');
+  const sounds = {
+    correct: document.getElementById('seCorrect'),
+    wrong: document.getElementById('seWrong'),
+    finish: document.getElementById('seFinish')
+  };
+
+  const GAME_SECONDS = 90;
+  const HIT_RANGE = 50;
+  const NEXT_X = 2255;
+  const NEXT_Y = 1775;
+
+  const answers = {
+    5: [[1493,1266],[1780,1327],[2263,1247],[2600,922],[1753,820]],
+    7: [[1690,1438],[2217,1506],[2360,1564],[2620,855],[2391,600]],
+    9: [[1720,1008],[2513,1240],[1925,1129],[2064,981],[2501,1590]]
+  };
+  const resultScreen = { 5:6, 7:8, 9:10 };
+
+  let page = 1;
+  let gameImage = null;
+  let gameActive = false;
+  let ending = false;
+  let found = new Set();
+  let remaining = GAME_SECONDS;
+  let timerId = null;
+  let finishTimerId = null;
+  let noticeTimerId = null;
+  let audioUnlocked = false;
+
+  function showNotice(message, milliseconds = 2500) {
+    clearTimeout(noticeTimerId);
+    notice.textContent = message;
+    notice.style.display = 'block';
+    if (milliseconds > 0) {
+      noticeTimerId = setTimeout(() => { notice.style.display = 'none'; }, milliseconds);
+    }
+  }
+
+  function showImage(number) {
+    page = Number(number);
+    marks.innerHTML = '';
+    screen.alt = page + '.jpg';
+    screen.src = page + '.jpg';
+  }
+
+  function playSound(audio) {
+    try {
+      audio.currentTime = 0;
+      const promise = audio.play();
+      if (promise) promise.catch(() => {});
+    } catch (_) {}
+  }
+
+  function unlockAudio() {
+    if (audioUnlocked) return;
+    audioUnlocked = true;
+    [bgm, ...Object.values(sounds)].forEach(audio => {
+      const oldVolume = audio.volume;
+      audio.volume = 0;
+      const promise = audio.play();
+      if (promise) {
+        promise.then(() => {
+          audio.pause(); audio.currentTime = 0; audio.volume = oldVolume;
+        }).catch(() => { audio.volume = oldVolume; });
+      } else {
+        audio.volume = oldVolume;
+      }
+    });
+  }
+
+  function imagePoint(event) {
+    const rect = screen.getBoundingClientRect();
+    if (!screen.naturalWidth || !screen.naturalHeight || rect.width === 0 || rect.height === 0) return null;
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return null;
+    return {
+      x: (event.clientX - rect.left) * screen.naturalWidth / rect.width,
+      y: (event.clientY - rect.top) * screen.naturalHeight / rect.height,
+      cssX: event.clientX - rect.left,
+      cssY: event.clientY - rect.top,
+      scaleX: rect.width / screen.naturalWidth,
+      scaleY: rect.height / screen.naturalHeight
+    };
+  }
+
+  function addMark(text, x, y, className, removeAfterMs = 0) {
+    const mark = document.createElement('div');
+    mark.className = 'mark ' + className;
+    mark.textContent = text;
+    mark.style.left = x + 'px';
+    mark.style.top = y + 'px';
+    marks.appendChild(mark);
+    if (removeAfterMs > 0) setTimeout(() => mark.remove(), removeAfterMs);
+  }
+
+  function startGame() {
+    clearTimeout(finishTimerId);
+    const choices = [5, 7, 9];
+    gameImage = choices[Math.floor(Math.random() * choices.length)];
+    found = new Set();
+    remaining = GAME_SECONDS;
+    gameActive = true;
+    ending = false;
+    finishEl.style.display = 'none';
+    showImage(gameImage);
+    timerEl.textContent = String(remaining);
+    timerEl.style.display = 'block';
+
+    clearInterval(timerId);
+    bgm.currentTime = 0;
+    bgm.play().catch(() => showNotice('音が出ない場合は、画面をもう一度タップしてください'));
+
+    timerId = setInterval(() => {
+      remaining -= 1;
+      timerEl.textContent = String(Math.max(0, remaining));
+      if (remaining <= 0) endGame();
+    }, 1000);
+  }
+
+  function endGame() {
+    if (!gameActive || ending) return;
+
+    // 遷移先を先に確定して保持することが修正の要点です。
+    const finishedGameImage = Number(gameImage);
+    const nextPage = resultScreen[finishedGameImage];
+    if (!nextPage) {
+      showNotice('結果画面を特定できません。1.jpgに戻ります。', 3000);
+      resetToStart();
+      return;
+    }
+
+    gameActive = false;
+    ending = true;
+    clearInterval(timerId);
+    timerId = null;
+    timerEl.style.display = 'none';
+    bgm.pause();
+    bgm.currentTime = 0;
+    playSound(sounds.finish);
+    finishEl.style.display = 'flex';
+
+    // 結果画像を事前に読み込んで、iPadでも遷移を安定させます。
+    const preload = new Image();
+    preload.src = nextPage + '.jpg';
+
+    clearTimeout(finishTimerId);
+    finishTimerId = setTimeout(() => {
+      finishEl.style.display = 'none';
+      showImage(nextPage);
+      ending = false;
+    }, 3000);
+  }
+
+  function resetToStart() {
+    clearInterval(timerId);
+    clearTimeout(finishTimerId);
+    timerId = null;
+    finishTimerId = null;
+    bgm.pause();
+    bgm.currentTime = 0;
+    gameActive = false;
+    ending = false;
+    gameImage = null;
+    found = new Set();
+    remaining = GAME_SECONDS;
+    timerEl.style.display = 'none';
+    finishEl.style.display = 'none';
+    showImage(1);
+  }
+
+  stage.addEventListener('pointerup', event => {
+    event.preventDefault();
+    unlockAudio();
+    if (ending) return;
+
+    const p = imagePoint(event);
+    if (!p) return;
+
+    if (!gameActive) {
+      if ([1,2,3].includes(page) && p.x > NEXT_X && p.y > NEXT_Y) {
+        showImage(page + 1);
+      } else if (page === 4 && p.x > 900 && p.x < 1930 && p.y > 935 && p.y < 1285) {
+        startGame();
+      } else if ([6,8,10].includes(page) && p.x > NEXT_X && p.y > NEXT_Y) {
+        showImage(11);
+      } else if (page === 11 && p.x > NEXT_X && p.y > NEXT_Y) {
+        resetToStart();
+      }
+      return;
+    }
+
+    if (p.x > NEXT_X && p.y > NEXT_Y) {
+      endGame();
+      return;
+    }
+
+    const points = answers[gameImage];
+    let hitIndex = -1;
+    for (let i = 0; i < points.length; i++) {
+      const [answerX, answerY] = points[i];
+      if (!found.has(i) && Math.abs(p.x - answerX) <= HIT_RANGE && Math.abs(p.y - answerY) <= HIT_RANGE) {
+        hitIndex = i;
+        break;
+      }
+    }
+
+    if (hitIndex >= 0) {
+      found.add(hitIndex);
+      const [answerX, answerY] = points[hitIndex];
+      addMark('○', answerX * p.scaleX, answerY * p.scaleY, 'correct');
+      playSound(sounds.correct);
+      if (found.size === points.length) endGame();
+    } else {
+      addMark('×', p.cssX, p.cssY, 'wrong', 1000);
+      playSound(sounds.wrong);
+    }
+  }, { passive:false });
+
+  screen.addEventListener('error', () => {
+    const fileName = page + '.jpg';
+    showNotice(fileName + ' をHTMLと同じフォルダーに置いてください', 0);
+  });
+  screen.addEventListener('load', () => { notice.style.display = 'none'; });
+  window.addEventListener('contextmenu', event => event.preventDefault());
+})();
+</script>
+</body>
+</html>
